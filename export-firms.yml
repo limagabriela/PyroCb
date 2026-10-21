@@ -1,0 +1,48 @@
+name: Atualizar módulo PyroCb
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Fire_evolution_pyrocb.ipynb"
+      - ".github/workflows/export-firms.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  exportar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gerar Python a partir do notebook
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          origem = Path("Fire_evolution_pyrocb.ipynb")
+          notebook = json.loads(origem.read_text(encoding="utf-8"))
+          trechos = [
+              "".join(celula.get("source", []))
+              for celula in notebook["cells"]
+              if celula.get("cell_type") == "code"
+              and "".join(celula.get("source", [])).lstrip().startswith("# EXPORT_TO_GITHUB")
+          ]
+          if not trechos:
+              raise RuntimeError("Não encontrei a célula # EXPORT_TO_GITHUB")
+
+          codigo = "# Gerado de Fire_evolution_pyrocb.ipynb. Edite o notebook-fonte no Colab.\n\n" + "\n\n".join(trechos) + "\n"
+          compile(codigo, "Fire_evolution_pyrocb.py", "exec")
+          Path("Fire_evolution_pyrocb.py").write_text(codigo, encoding="utf-8")
+          PY
+      - name: Publicar Python atualizado
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Fire_evolution_pyrocb.py
+          if ! git diff --cached --quiet; then
+            git commit -m "Atualiza módulo FIRMS a partir do notebook [skip ci]"
+            git push
+          fi
