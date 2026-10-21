@@ -1,12 +1,13 @@
 # Generated automatically from fire_evolution_pyrocb.ipynb. Edit the notebook, not this file.
 
 # EXPORT_TO_GITHUB
-"""PyroCb: NASA FIRMS download and scientific figures.
+"""PyroCb: NASA FIRMS MODIS-only temporal and interannual fire analysis.
 
-Source of truth: fire_evolution_pyrocb.ipynb.
-The main Colab only provides MAP_KEY; do not commit credentials.
+Edit fire_evolution_pyrocb.ipynb, commit to GitHub; export to the Python module.
+The calling Colab only needs the NASA FIRMS MAP_KEY.
 """
 
+from calendar import monthrange, month_name
 from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
@@ -22,8 +23,8 @@ import numpy as np
 import pandas as pd
 import requests
 
-PYROCB_VERSION = "2026-10-21-hourly-3panels-hexbin-v1"
-FAMILIAS = ("MODIS", "VIIRS_SNPP", "VIIRS_NOAA20", "VIIRS_NOAA21")
+PYROCB_VERSION = "2026-10-21-modis-interannual-v2"
+FAMILIAS = ("MODIS",)   # MODIS only, never VIIRS
 BASE_URL = "https://firms.modaps.eosdis.nasa.gov/api"
 
 
@@ -38,7 +39,13 @@ BBOX = "-62.5,-21,-57,-17"
 CONFIANCA_MIN = 50
 
 TIME_BIN_HOURS = 1
-TEMP_SENSOR = "MODIS"  # MODIS or VIIRS; do not pool thermal channels
+
+# Compare the same calendar month in reference year +/- 5 years.
+MES_REFERENCIA = 8
+ANO_REFERENCIA = 2019
+ANOS_VIZINHOS = 5
+GERAR_COMPARACAO_INTERANUAL = True
+TEMP_SENSOR = "MODIS"  # use MODIS brightness band for all temperatures
 
 PASTA_DADOS = "/content/firms/dados"
 FIG_DIR = Path("/content/firms/figures")
@@ -52,8 +59,10 @@ MM = 1 / 25.4
 FIG_WIDTH_MM = 183
 FIG_SERIES_HEIGHT_MM = 180
 FIG_MAP_HEIGHT_MM = 125
+FIG_ANNUAL_HEIGHT_MM = 93
 FIG_SERIES_SIZE = (FIG_WIDTH_MM * MM, FIG_SERIES_HEIGHT_MM * MM)
 FIG_MAP_SIZE = (FIG_WIDTH_MM * MM, FIG_MAP_HEIGHT_MM * MM)
+FIG_ANNUAL_SIZE = (FIG_WIDTH_MM * MM, FIG_ANNUAL_HEIGHT_MM * MM)
 
 COLORS = {
     "blue": "#0072B2",
@@ -115,6 +124,28 @@ def _id_area(bbox):
 # FUNÇÕES AUXILIARES DA API
 # ==================================================
 
+class SemCoberturaFIRMS(RuntimeError):
+    """The requested period has no complete MODIS availability."""
+
+
+class SemDeteccoesFIRMS(RuntimeError):
+    """No valid MODIS detections in the requested date/area period."""
+
+
+def _consultar_disponibilidade(map_key):
+    """Get available FIRMS sources once for an interannual batch."""
+    resposta = requests.get(f"{BASE_URL}/data_availability/csv/{map_key}/ALL", timeout=120)
+    resposta.raise_for_status()
+    tab = pd.read_csv(StringIO(resposta.text))
+    expected = {"data_id", "min_date", "max_date"}
+    if not expected.issubset(tab.columns):
+        raise RuntimeError("Unexpected FIRMS availability response")
+    tab["data_id"] = tab["data_id"].astype(str).str.strip().str.upper()
+    tab["min_date"] = pd.to_datetime(tab["min_date"]).dt.date
+    tab["max_date"] = pd.to_datetime(tab["max_date"]).dt.date
+    return tab.to_dict("records")
+
+
 def _fonte_disponivel(linhas, familia, dia):
     """Prefere SP e usa NRT apenas nas datas ainda sem SP."""
     for modo in ("SP", "NRT"):
@@ -172,9 +203,10 @@ def _garantir_pyarrow():
     except ImportError:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pyarrow"])
 
+
 # EXPORT_TO_GITHUB
 # ==================================================
-# DOWNLOAD E PROCESSAMENTO DOS DADOS
+# MODIS-ONLY DOWNLOAD, FILTER AND PARQUET CACHE
 # ==================================================
 
 def baixar_e_processar_firms(
@@ -185,123 +217,88 @@ def baixar_e_processar_firms(
     confianca_min=None,
     pasta=None,
     rebaixar=False,
+    disponibilidade=None,
 ):
-    """Baixa MODIS + VIIRS, filtra por confiança e salva um Parquet.
+    """Download MODIS SP (or NRT when SP is not available) in <=5-day blocks.
 
-    Returns:
-        dict com df_firms, arquivo, resumo e datas.
+    Filters numeric MODIS confidence >= threshold after concatenating raw batches.
+    Separate MODIS-only Parquet filenames prevent reuse of older MODIS+VIIRS caches.
     """
     if not str(map_key).strip():
-        raise ValueError("Forneça map_key no notebook que chama baixar_e_processar_firms().")
-
-    data_inicial = DATA_INICIAL if data_inicial is None else data_inicial
-    data_final = DATA_FINAL if data_final is None else data_final
+        raise ValueError("A NASA FIRMS MAP_KEY must be supplied by the calling notebook.")
+    data_inicial = DATA_INICIAL if data_inicial is None else str(data_inicial)
+    data_final = DATA_FINAL if data_final is None else str(data_final)
     bbox = BBOX if bbox is None else bbox
     confianca_min = CONFIANCA_MIN if confianca_min is None else confianca_min
     pasta = PASTA_DADOS if pasta is None else pasta
 
-    _garantir_pyarrow()
-
-    inicio = date.fromisoformat(data_inicial)
-    fim = date.fromisoformat(data_final)
+    inicio, fim = date.fromisoformat(data_inicial), date.fromisoformat(data_final)
     if inicio > fim:
-        raise ValueError("data_inicial deve ser anterior ou igual a data_final")
+        raise ValueError("data_inicial must not be after data_final")
 
     pasta = Path(pasta)
     pasta.mkdir(parents=True, exist_ok=True)
     area_id = _id_area(bbox)
     arquivo = pasta / (
-        f"FIRMS_MODIS_VIIRS_{data_inicial}_{data_final}_{area_id}_"
-        f"modis{confianca_min}_viirsNH.parquet"
+        f"FIRMS_MODIS_{data_inicial}_{data_final}_{area_id}_"
+        f"confidence{confianca_min}.parquet"
     )
 
     if arquivo.exists() and not rebaixar:
-        try:
-            df_firms = pd.read_parquet(arquivo)
-            if df_firms.empty or not {"sensor", "fonte_firms"}.issubset(df_firms.columns):
-                raise ValueError("Parquet vazio ou sem colunas necessárias")
-            resumo = pd.DataFrame()
-            print(f"Reutilizando: {arquivo} ({len(df_firms):,} focos)")
-            return {
-                "df_firms": df_firms,
-                "arquivo": arquivo,
-                "resumo": resumo,
-                "inicio": inicio,
-                "fim": fim,
-                "bbox": bbox,
-            }
-        except Exception as exc:
-            raise RuntimeError(
-                f"Parquet existente inválido: {arquivo}. Use rebaixar=True para refazer."
-            ) from exc
+        _garantir_pyarrow()
+        df_firms = pd.read_parquet(arquivo)
+        if (df_firms.empty or not {"sensor", "fonte_firms", "frp", "acq_date"}.issubset(df_firms.columns)
+                or not df_firms["sensor"].eq("MODIS").all()):
+            raise RuntimeError(f"Invalid MODIS-only cache: {arquivo}; use rebaixar=True")
+        print(f"Reutilizando MODIS: {arquivo} ({len(df_firms):,} detecções)")
+        return dict(df_firms=df_firms, arquivo=arquivo, resumo=pd.DataFrame(),
+                    inicio=inicio, fim=fim, bbox=bbox)
+
+    linhas = _consultar_disponibilidade(map_key) if disponibilidade is None else disponibilidade
+    tarefas, cobertura = _montar_tarefas(linhas, inicio, fim)
+    todos_dias = {inicio + timedelta(days=i) for i in range((fim - inicio).days + 1)}
+    faltantes = sorted(todos_dias - cobertura)
+    if faltantes:
+        raise SemCoberturaFIRMS(
+            f"Missing MODIS availability for {len(faltantes)} days "
+            f"between {inicio} and {fim}; first missing: {faltantes[0]}"
+        )
 
     registros = []
+    print(f"MODIS {inicio} – {fim}: {len(tarefas)} requisições (até 5 dias cada)")
     with requests.Session() as sess:
-        disponibilidade = sess.get(f"{BASE_URL}/data_availability/csv/{map_key}/ALL", timeout=120)
-        disponibilidade.raise_for_status()
-        tab = pd.read_csv(StringIO(disponibilidade.text))
-
-        colunas = {"data_id", "min_date", "max_date"}
-        if not colunas.issubset(tab.columns):
-            raise RuntimeError(f"Resposta inesperada da disponibilidade: {disponibilidade.text[:200]}")
-
-        tab["data_id"] = tab["data_id"].astype(str).str.strip().str.upper()
-        tab["min_date"] = pd.to_datetime(tab["min_date"]).dt.date
-        tab["max_date"] = pd.to_datetime(tab["max_date"]).dt.date
-
-        linhas = tab.to_dict("records")
-        tarefas, cobertura = _montar_tarefas(linhas, inicio, fim)
-
-        todos_dias = {inicio + timedelta(days=i) for i in range((fim - inicio).days + 1)}
-        faltantes = sorted(todos_dias - cobertura)
-        if faltantes:
-            raise RuntimeError(
-                f"Sem cobertura MODIS/VIIRS para {len(faltantes)} dia(s), por exemplo {faltantes[:3]}."
-            )
-
-        print("Fontes consultadas:", ", ".join(dict.fromkeys(t[0] for t in tarefas)))
-        print("A filtragem de confiança ocorre somente depois de juntar todas as fontes.\n")
-
         for fonte, primeiro, dias in tarefas:
             url = f"{BASE_URL}/area/csv/{map_key}/{fonte}/{bbox}/{dias}/{primeiro.isoformat()}"
             df = _ler_csv_firms(sess.get(url, timeout=240), fonte)
             df["fonte_firms"] = fonte
-            df["sensor"] = "MODIS" if fonte.startswith("MODIS") else "VIIRS"
+            df["sensor"] = "MODIS"
             registros.append(df)
-            print(f"{fonte:20s} {primeiro.isoformat()} (+{dias-1}): {len(df):,} recebidos")
 
     df_bruto = pd.concat(registros, ignore_index=True)
-    conf = df_bruto["confidence"].astype("string").str.strip().str.lower()
-    conf_num = pd.to_numeric(conf.str.replace("%", "", regex=False), errors="coerce")
+    if df_bruto.empty:
+        raise SemDeteccoesFIRMS(f"No MODIS fire detections: {inicio} – {fim}")
 
-    filtro_modis = df_bruto["sensor"].eq("MODIS") & conf_num.ge(confianca_min)
-    filtro_viirs = df_bruto["sensor"].eq("VIIRS") & conf.isin(["n", "nominal", "h", "high"])
-    df_firms = df_bruto.loc[(filtro_modis | filtro_viirs).fillna(False)].copy().reset_index(drop=True)
+    conf_num = pd.to_numeric(
+        df_bruto["confidence"].astype("string").str.strip().str.replace("%", "", regex=False),
+        errors="coerce",
+    )
+    df_firms = df_bruto.loc[conf_num.ge(confianca_min).fillna(False)].copy().reset_index(drop=True)
+    if df_firms.empty:
+        raise SemDeteccoesFIRMS(
+            f"No MODIS detections with confidence >= {confianca_min}: {inicio} – {fim}"
+        )
 
     resumo = (
         df_bruto.groupby("fonte_firms").size().rename("recebidos").to_frame()
         .join(df_firms.groupby("fonte_firms").size().rename("mantidos"))
         .fillna(0).astype(int)
     )
-
-    print("\n=========== RESULTADO DO FILTRO ===========")
-    print(resumo.to_string())
-    print(f"Total bruto: {len(df_bruto):,} | Total filtrado: {len(df_firms):,}")
-
-    if df_firms.empty:
-        raise RuntimeError("Nenhum foco passou no filtro; nenhum Parquet foi salvo.")
-
+    print(f"MODIS detecções: {len(df_bruto):,} brutas; {len(df_firms):,} filtradas")
+    _garantir_pyarrow()
     df_firms.to_parquet(arquivo, engine="pyarrow", compression="zstd", index=False)
-    print(f"\nParquet salvo em: {arquivo}")
-
-    return {
-        "df_firms": df_firms,
-        "arquivo": arquivo,
-        "resumo": resumo,
-        "inicio": inicio,
-        "fim": fim,
-        "bbox": bbox,
-    }
+    print(f"Parquet salvo: {arquivo}")
+    return dict(df_firms=df_firms, arquivo=arquivo, resumo=resumo,
+                inicio=inicio, fim=fim, bbox=bbox)
 
 
 # EXPORT_TO_GITHUB
@@ -337,14 +334,12 @@ def gerar_figura_serie_temporal(
     df["frp_mw"] = pd.to_numeric(df["frp"], errors="coerce")
     df.loc[df["frp_mw"] < 0, "frp_mw"] = np.nan
 
-    # MODIS brightness and VIIRS I4 differ: compare within one sensor only.
-    if TEMP_SENSOR not in ("MODIS", "VIIRS"):
-        raise ValueError("TEMP_SENSOR must be MODIS or VIIRS")
-    temp_col = "bright_ti4" if TEMP_SENSOR == "VIIRS" else "brightness"
+    # MODIS thermal brightness (K), converted to degrees Celsius.
+    temp_col = "brightness"
     if temp_col not in df:
         df[temp_col] = np.nan
     df["temp_c"] = np.nan
-    mask = df["sensor"].eq(TEMP_SENSOR)
+    mask = df["sensor"].eq("MODIS")
     temp_k = pd.to_numeric(df.loc[mask, temp_col], errors="coerce")
     df.loc[mask, "temp_c"] = temp_k.where(temp_k > 0) - 273.15
 
@@ -419,7 +414,7 @@ def gerar_figura_serie_temporal(
     name = (
         f"firms_temporal_3panels_{TIME_BIN_HOURS}h_"
         f"{start:%Y%m%d}_{end:%Y%m%d}_{_id_area(bbox)}_"
-        f"modis{confianca_min}_viirsNH_{TEMP_SENSOR.lower()}"
+        f"modis_conf{confianca_min}"
     )
     save_publication_figure(fig, name)
     if mostrar:
@@ -458,6 +453,7 @@ def gerar_figura_mapa(
     inicio=None,
     fim=None,
     confianca_min=50,
+    prefixo_arquivo="firms_spatial_density_plasma",
 ):
     df = df_firms.copy()
     df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
@@ -512,9 +508,9 @@ def gerar_figura_mapa(
     start = pd.Timestamp(inicio) if inicio is not None else dates.min()
     end = pd.Timestamp(fim) if fim is not None else dates.max()
     name = (
-        f"firms_spatial_density_plasma_"
+        f"{prefixo_arquivo}_"
         f"{start:%Y%m%d}_{end:%Y%m%d}_{_id_area(bbox)}_"
-        f"modis{confianca_min}_viirsNH"
+        f"modis_conf{confianca_min}"
     )
     save_publication_figure(fig, name)
     if mostrar:
@@ -522,6 +518,145 @@ def gerar_figura_mapa(
         display(fig)
         plt.close(fig)
     return fig
+
+
+# EXPORT_TO_GITHUB
+# ==================================================
+# FIGURE 3 AND 4 — INTERANNUAL FRP AND SPATIAL HEATMAP
+# ==================================================
+
+def gerar_figura_frp_interanual(serie_anual, mes, ano_referencia, bbox, confianca_min,
+                                mostrar=True):
+    """One panel with mean and maximum MODIS FRP for the same month in each year."""
+    fig, ax = plt.subplots(figsize=FIG_ANNUAL_SIZE, layout="constrained")
+    x = np.arange(len(serie_anual))
+    width = 0.36
+    ax.bar(x - width/2, serie_anual["frp_mean_mw"], width=width,
+           color=COLORS["green"], label="Mean FRP", linewidth=0)
+    ax.bar(x + width/2, serie_anual["frp_max_mw"], width=width,
+           color=COLORS["vermillion"], label="Maximum FRP", linewidth=0)
+    ax.set_xticks(x, [str(y) for y in serie_anual["ano"]])
+    ax.set_ylabel("FRP (MW)")
+    ax.set_xlabel(f"Year ({month_name[mes]})")
+    ax.set_ylim(bottom=0)
+    ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
+    ax.legend(ncol=2, frameon=False, loc="upper right")
+    name = (f"firms_modis_frp_interannual_month{mes:02d}_"
+            f"year{ano_referencia}_pm{ANOS_VIZINHOS}_{_id_area(bbox)}_"
+            f"conf{confianca_min}")
+    save_publication_figure(fig, name)
+    if mostrar:
+        from IPython.display import display
+        display(fig)
+        plt.close(fig)
+    return fig
+
+
+def comparar_mes_interanual(
+    map_key,
+    mes=None,
+    ano_referencia=None,
+    anos_vizinhos=None,
+    bbox=None,
+    confianca_min=None,
+    pasta=None,
+    rebaixar=False,
+    mostrar=True,
+):
+    """Compare one complete calendar month across reference year +/- N years.
+
+    All detections are MODIS only, same bbox and confidence threshold.
+    Returns annual FRP stats and pooled spatial density map across compared months.
+    """
+    mes = MES_REFERENCIA if mes is None else int(mes)
+    ano_referencia = ANO_REFERENCIA if ano_referencia is None else int(ano_referencia)
+    anos_vizinhos = ANOS_VIZINHOS if anos_vizinhos is None else int(anos_vizinhos)
+    bbox = BBOX if bbox is None else bbox
+    confianca_min = CONFIANCA_MIN if confianca_min is None else confianca_min
+    pasta = PASTA_DADOS if pasta is None else pasta
+    if not 1 <= mes <= 12 or anos_vizinhos < 0:
+        raise ValueError("mes must be 1..12 and anos_vizinhos must be >= 0")
+
+    years = list(range(ano_referencia - anos_vizinhos,
+                       ano_referencia + anos_vizinhos + 1))
+    disponibilidade = None  # load only if needed for uncached intervals
+    registros_anuais = []
+    arquivos_anuais = {}
+    dfs = []
+    anos_sem_cobertura = []
+    hoje = date.today()
+    print(f"\n===== MODIS: {month_name[mes]} | {years[0]}–{years[-1]} | bbox {bbox} =====")
+
+    for ano in years:
+        inicio = date(ano, mes, 1)
+        fim = date(ano, mes, monthrange(ano, mes)[1])
+        if fim > hoje:
+            print(f"{ano}: incomplete/future month; skipped")
+            anos_sem_cobertura.append(ano)
+            continue
+        try:
+            # First attempt to load the existing MODIS-only Parquet without contacting FIRMS.
+            # If absent, the availability data are looked up once and reused.
+            nome = Path(pasta) / (
+                f"FIRMS_MODIS_{inicio.isoformat()}_{fim.isoformat()}_"
+                f"{_id_area(bbox)}_confidence{confianca_min}.parquet"
+            )
+            if disponibilidade is None and not (nome.exists() and not rebaixar):
+                disponibilidade = _consultar_disponibilidade(map_key)
+            resultado = baixar_e_processar_firms(
+                map_key=map_key, data_inicial=inicio.isoformat(),
+                data_final=fim.isoformat(), bbox=bbox,
+                confianca_min=confianca_min, pasta=pasta,
+                rebaixar=rebaixar, disponibilidade=disponibilidade,
+            )
+        except SemCoberturaFIRMS as exc:
+            print(f"{ano}: excluded (incomplete MODIS coverage): {exc}")
+            anos_sem_cobertura.append(ano)
+            continue
+        except SemDeteccoesFIRMS:
+            print(f"{ano}: zero qualifying MODIS detections")
+            registros_anuais.append(dict(ano=ano, focos=0, frp_mean_mw=np.nan,
+                                         frp_max_mw=np.nan))
+            continue
+
+        df = resultado["df_firms"].copy()
+        df["ano_comparacao"] = ano
+        frp = pd.to_numeric(df["frp"], errors="coerce")
+        frp = frp.where(frp >= 0)
+        registros_anuais.append(dict(
+            ano=ano, focos=len(df), frp_mean_mw=frp.mean(), frp_max_mw=frp.max()
+        ))
+        arquivos_anuais[ano] = resultado["arquivo"]
+        dfs.append(df)
+        print(f"{ano}: {len(df):,} detecções; mean FRP={frp.mean():.2f} MW; "
+              f"max FRP={frp.max():.2f} MW")
+
+    if not registros_anuais:
+        raise RuntimeError("No complete year/month with MODIS coverage and valid data")
+    serie_anual = pd.DataFrame(registros_anuais).sort_values("ano").reset_index(drop=True)
+    fig_frp_anual = gerar_figura_frp_interanual(
+        serie_anual, mes, ano_referencia, bbox, confianca_min, mostrar=mostrar,
+    )
+
+    df_interanual = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    fig_mapa_interanual = None
+    if not df_interanual.empty:
+        fig_mapa_interanual = gerar_figura_mapa(
+            df_interanual,
+            bbox=bbox, mostrar=mostrar,
+            inicio=date(int(serie_anual["ano"].min()), mes, 1),
+            fim=date(int(serie_anual["ano"].max()), mes, monthrange(int(serie_anual["ano"].max()), mes)[1]),
+            confianca_min=confianca_min,
+            prefixo_arquivo=f"firms_modis_heatmap_month{mes:02d}_year{ano_referencia}_pm{anos_vizinhos}",
+        )
+    return dict(
+        serie_anual=serie_anual,
+        df_interanual=df_interanual,
+        fig_frp_anual=fig_frp_anual,
+        fig_mapa_interanual=fig_mapa_interanual,
+        arquivos_anuais=arquivos_anuais,
+        anos_sem_cobertura=anos_sem_cobertura,
+    )
 
 
 # EXPORT_TO_GITHUB
@@ -572,6 +707,15 @@ def baixar_firms(
         mostrar=mostrar, bbox=resultado["bbox"],
         confianca_min=confianca_min,
     )
+
+    comparacao = (
+        comparar_mes_interanual(
+            map_key=map_key, mes=MES_REFERENCIA, ano_referencia=ANO_REFERENCIA,
+            anos_vizinhos=ANOS_VIZINHOS, bbox=bbox,
+            confianca_min=confianca_min, pasta=pasta,
+            rebaixar=rebaixar, mostrar=mostrar,
+        ) if GERAR_COMPARACAO_INTERANUAL else {}
+    )
     return {
         "df_firms": resultado["df_firms"],
         "serie_temporal": serie_temporal,
@@ -579,5 +723,6 @@ def baixar_firms(
         "fig_mapa": fig_mapa,
         "arquivo": resultado["arquivo"],
         "resumo": resultado["resumo"],
+        **comparacao,
     }
 
