@@ -1,4 +1,4 @@
-name: Atualizar módulo PyroCb
+name: Export PyroCb notebook to Python
 
 on:
   push:
@@ -12,37 +12,48 @@ permissions:
   contents: write
 
 jobs:
-  exportar:
+  export:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Gerar Python a partir do notebook
+
+      - name: Export marked notebook cells
+        shell: bash
         run: |
-          python - <<'PY'
+          python - <<'PYCODE'
           import json
           from pathlib import Path
 
-          origem = Path("Fire_evolution_pyrocb.ipynb")
-          notebook = json.loads(origem.read_text(encoding="utf-8"))
-          trechos = [
-              "".join(celula.get("source", []))
-              for celula in notebook["cells"]
-              if celula.get("cell_type") == "code"
-              and "".join(celula.get("source", [])).lstrip().startswith("# EXPORT_TO_GITHUB")
+          notebook_path = Path("Fire_evolution_pyrocb.ipynb")
+          notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+          blocks = [
+              "".join(cell.get("source", []))
+              for cell in notebook["cells"]
+              if cell.get("cell_type") == "code"
+              and "".join(cell.get("source", [])).lstrip().startswith("# EXPORT_TO_GITHUB")
           ]
-          if not trechos:
-              raise RuntimeError("Não encontrei a célula # EXPORT_TO_GITHUB")
+          if not blocks:
+              raise RuntimeError("No code cells marked # EXPORT_TO_GITHUB")
 
-          codigo = "# Gerado de Fire_evolution_pyrocb.ipynb. Edite o notebook-fonte no Colab.\n\n" + "\n\n".join(trechos) + "\n"
-          compile(codigo, "Fire_evolution_pyrocb.py", "exec")
-          Path("Fire_evolution_pyrocb.py").write_text(codigo, encoding="utf-8")
-          PY
-      - name: Publicar Python atualizado
+          code = (
+              "# Generated from Fire_evolution_pyrocb.ipynb by GitHub Actions. Edit the notebook instead.\n\n"
+              + "\n\n".join(blocks) + "\n"
+          )
+          compile(code, "Fire_evolution_pyrocb.py", "exec")
+          Path("Fire_evolution_pyrocb.py").write_text(code, encoding="utf-8")
+          print(f"Exported {len(blocks)} cells to Fire_evolution_pyrocb.py")
+          PYCODE
+
+      - name: Commit generated Python module
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Fire_evolution_pyrocb.py
           if ! git diff --cached --quiet; then
-            git commit -m "Atualiza módulo FIRMS a partir do notebook [skip ci]"
+            git commit -m "Update FIRMS Python module from Colab [skip ci]"
             git push
+          else
+            echo "Generated module is already current."
           fi
+
