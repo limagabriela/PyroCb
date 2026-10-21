@@ -34,11 +34,11 @@ BASE_URL = "https://firms.modaps.eosdis.nasa.gov/api"
 
 DATA_INICIAL = "2019-08-16"
 DATA_FINAL = "2019-08-19"
-BBOX = "-59,-21,-53,-17"
+BBOX = "-65,-21,-53,-17"
 CONFIANCA_MIN = 50
 
 TIME_BIN_HOURS = 1
-TEMP_SENSOR = "VIIRS"  # MODIS or VIIRS; do not pool thermal channels
+TEMP_SENSOR = "MODIS"  # MODIS or VIIRS; do not pool thermal channels
 
 PASTA_DADOS = "/content/firms/dados"
 FIG_DIR = Path("/content/firms/figures")
