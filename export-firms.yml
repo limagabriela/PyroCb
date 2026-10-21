@@ -71,4 +71,3 @@ jobs:
           else
             echo "Python module is already up to date."
           fi
-
