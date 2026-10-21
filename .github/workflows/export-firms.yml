@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths:
+      - "fire_evolution_pyrocb.ipynb"
       - "Fire_evolution_pyrocb.ipynb"
       - ".github/workflows/export-firms.yml"
   workflow_dispatch:
@@ -25,7 +26,13 @@ jobs:
           import json
           from pathlib import Path
 
-          notebook = json.loads(Path("Fire_evolution_pyrocb.ipynb").read_text(encoding="utf-8"))
+          # The notebook is currently stored with an initial lowercase f.
+          options = [Path("fire_evolution_pyrocb.ipynb"), Path("Fire_evolution_pyrocb.ipynb")]
+          notebook_path = next((p for p in options if p.exists()), None)
+          if notebook_path is None:
+              raise FileNotFoundError("Neither notebook filename exists in the repository root")
+
+          notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
           blocks = [
               "".join(cell.get("source", []))
               for cell in notebook["cells"]
@@ -33,10 +40,10 @@ jobs:
               and "".join(cell.get("source", [])).lstrip().startswith("# EXPORT_TO_GITHUB")
           ]
           if not blocks:
-              raise RuntimeError("No cells marked # EXPORT_TO_GITHUB")
+              raise RuntimeError("No code cells marked # EXPORT_TO_GITHUB")
 
           code = (
-              "# Generated from Fire_evolution_pyrocb.ipynb by GitHub Actions. Edit the notebook instead.\n\n"
+              f"# Generated automatically from {notebook_path.name}. Edit the notebook, not this file.\n\n"
               + "\n\n".join(blocks) + "\n"
           )
           compile(code, "Fire_evolution_pyrocb.py", "exec")
@@ -46,17 +53,17 @@ jobs:
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
           }
           expected = {
-              "baixar_firms",
-              "baixar_e_processar_firms",
-              "gerar_figura_serie_temporal",
-              "gerar_figura_mapa",
-              "save_publication_figure",
+              "baixar_firms", "baixar_e_processar_firms",
+              "gerar_figura_serie_temporal", "gerar_figura_mapa",
+              "save_publication_figure"
           }
           if not expected.issubset(names):
               raise RuntimeError(f"Missing exported functions: {sorted(expected - names)}")
 
           Path("Fire_evolution_pyrocb.py").write_text(code, encoding="utf-8")
-          print(f"Validated and exported {len(blocks)} notebook cells ({len(code.splitlines())} lines)")
+          print(f"Source notebook: {notebook_path.name}")
+          print(f"Exported {len(blocks)} cells; {len(code.splitlines())} lines")
+          print(f"Hourly plot present: {'frp_max_mw' in code and 'TIME_BIN_HOURS' in code}")
           PYCODE
 
       - name: Commit generated module
@@ -69,6 +76,6 @@ jobs:
             git commit -m "Update FIRMS module from notebook [skip ci]"
             git push
           else
-            echo "Python module is already up to date."
+            echo "Python module already up to date."
           fi
 
