@@ -1,0 +1,51 @@
+name: Export GOES-16 notebook to Python
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - fire_evolution_goes16.ipynb
+      - .github/workflows/export_goes16.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Export tagged notebook cells
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('fire_evolution_goes16.ipynb')
+          nb = json.loads(path.read_text(encoding='utf-8'))
+          code = []
+          for cell in nb['cells']:
+              if cell['cell_type'] != 'code':
+                  continue
+              source = cell.get('source', [])
+              source = ''.join(source) if isinstance(source, list) else source
+              if source.lstrip().startswith('# EXPORT_TO_GITHUB'):
+                  code.append(source.rstrip())
+          if not code:
+              raise RuntimeError('No # EXPORT_TO_GITHUB cells found.')
+          Path('Fire_evolution_goes16.py').write_text(
+              '\n\n'.join(code) + '\n', encoding='utf-8'
+          )
+          PY
+      - name: Commit generated module (if changed)
+        run: |
+          git add Fire_evolution_goes16.py
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Update GOES-16 module from notebook"
+            git push
+          fi
