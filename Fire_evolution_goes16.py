@@ -37,7 +37,7 @@ CACHE_VERSION = "v1"
 # ============================================================
 DATA_INICIAL = "2019-08-17"
 DATA_FINAL = "2019-08-19"  # inclusive
-BBOX = "-62.5,-21,-57,-17"  # west, south, east, north (same as MODIS)
+BBOX = "-58.9,-19.8,-59.9,-18.8"  # west, south, east, north (same as MODIS)
 
 # NOAA: 10,30 = processed fire pixels, conservative, most reliable FRP.
 # 11,31 = saturated (FRP is a lower-bound estimate); add if desired.
