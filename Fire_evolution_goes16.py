@@ -38,7 +38,7 @@ _GRID_CACHE = {}
 # ============================================================
 DATA_INICIAL = "2019-08-17"
 DATA_FINAL = "2019-08-19"        # inclusive (UTC)
-BBOX = "-58.9,-19.8,-59.9,-18.8"      # west, south, east, north; same as MODIS
+BBOX = "-59.9,-19.8,-58.9,-18.8"
 CODIGOS_FOGO = (10, 30)         # processed, conservative; 11/31 = saturated
 PASSO_MINUTOS = 10              # can set 20/30/60 to speed up a trial
 MAX_DOWNLOADS = 2               # bounded temporary disk/RAM
