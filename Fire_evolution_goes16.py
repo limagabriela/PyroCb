@@ -429,7 +429,7 @@ def baixar_e_processar_goes(data_inicial=None, data_final=None, bbox=None,
               f"{len(local_files)} arquivos históricos locais")
         if not product_files:
             print(f"  AVISO: sem arquivos na AWS ou no arquivo histórico informado.")
-
+            print('atualizado')
     with ThreadPoolExecutor(max_workers=workers) as pool:
         n_total, n_done = len(hours)*len(PRODUTOS), 0
         for product in PRODUTOS:
